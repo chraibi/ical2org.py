@@ -1,5 +1,5 @@
 from __future__ import print_function
-
+from collections import defaultdict
 import sys
 import traceback
 from datetime import date, datetime, timedelta, time
@@ -13,18 +13,19 @@ from tzlocal import get_localzone
 MIDNIGHT = time(0, 0, 0)
 
 
-def org_datetime(dt, tz):
+
+def org_datetime(dt, tz, format="<%Y-%m-%d %a %H:%M>"):
     '''Timezone aware datetime to YYYY-MM-DD DayofWeek HH:MM str in localtime.
     '''
-    return dt.astimezone(tz).strftime("<%Y-%m-%d %a %H:%M>")
+    return dt.astimezone(tz).strftime(format)
 
 
-def org_date(dt, tz):
+def org_date(dt, tz, format="<%Y-%m-%d %a>"):
     '''Timezone aware date to YYYY-MM-DD DayofWeek in localtime.
     '''
     if hasattr(dt, "astimezone"):
         dt = dt.astimezone(tz)
-    return dt.strftime("<%Y-%m-%d %a>")
+    return dt.strftime(format)
 
 
 def event_is_declined(comp, emails):
@@ -47,7 +48,7 @@ class Convertor():
 
     # Do not change anything below
 
-    def __init__(self, days=90, tz=None, emails=[], include_location=True, continue_on_error=False):
+    def __init__(self, days=14, tz=None, emails=[], include_location=True, continue_on_error=False):
         """
         days: Window length in days (left & right from current time). Has
         to be positive.
@@ -64,52 +65,40 @@ class Convertor():
         try:
             cal = Calendar.from_ical(ics_file.read())
         except ValueError as e:
-            msg = "Parsing error: {}".format(e)
+            msg = f"Parsing error: {e}"
             raise IcalError(msg)
 
         now = datetime.now(utc)
-        start = now - timedelta(days=self.days)
+        start = now
         end = now + timedelta(days=self.days)
+        todos = defaultdict(list)
+        org_file.write("* IAS-7\n")
         for comp in recurring_ical_events.of(
             cal, keep_recurrence_attributes=True
         ).between(start, end):
             if event_is_declined(comp, self.emails):
                 continue
-            try:
-                org_file.write(self.create_entry(comp))
-            except Exception:
-                print("Exception when processing:\n", file=sys.stderr)
-                print(comp.to_ical().decode('utf-8') + "\n", file=sys.stderr)
-                if self.continue_on_error:
-                    print(traceback.format_exc(), file=sys.stderr)
-                else:
-                    raise
+            
+            start_date, text = self.create_entry(comp)
+            todos[start_date].append(text)
 
-    def create_entry(self, comp):
-        output = []
+   
+        for meetings in sorted(todos.values()):
+            for meeting in meetings:
+                org_file.write(meeting)
+            
+    def create_entry(self, comp):        
         summary = None
         if "SUMMARY" in comp:
             summary = comp['SUMMARY'].to_ical().decode("utf-8")
             summary = summary.replace('\\,', ',')
         location = None
-        if "LOCATION" in comp:
-            location = comp['LOCATION'].to_ical().decode("utf-8")
-            location = location.replace('\\,', ',')
         if not any((summary, location)):
             summary = u"(No title)"
-        else:
-            summary += " - " + location if location and self.include_location else ''
+        
         rec_event = "RRULE" in comp
         description = None
-        if 'DESCRIPTION' in comp:
-            description = '\n'.join(comp['DESCRIPTION'].to_ical()
-                                    .decode("utf-8").split('\\n'))
-            description = description.replace('\\,', ',')
-
-        output.append(u"* {}".format(summary))
-        if rec_event and self.RECUR_TAG:
-            output.append(u" {}".format(self.RECUR_TAG))
-        output.append(u"\n")
+        
 
         # Get start/end/duration
         ev_start = None
@@ -136,25 +125,30 @@ class Convertor():
         # Format date/time appropriately
         if isinstance(ev_start, datetime):
             # Normal event with start and end
-            output.append("  {}--{}\n".format(
-                org_datetime(ev_start, self.tz), org_datetime(ev_end, self.tz)
-                ))
+            
+            # output.append("  {}--{}\n".format(
+            #     org_datetime(ev_start, self.tz), org_datetime(ev_end, self.tz)
+            #     ))
+            start_date = org_datetime(ev_start, self.tz)
+            
         elif isinstance(ev_start, date):
-            if ev_start == ev_end - timedelta(days=1):
-                # single day event
-                output.append("  {}\n".format(org_date(ev_start, self.tz)))
-            else:
-                # multiple day event
-                output.append(
-                    "  {}--{}\n".format(
-                        org_date(ev_start, self.tz),
-                        org_date(ev_end - timedelta(days=1), self.tz),
-                    ))
+            start_date = org_date(ev_start, self.tz)
+                
+                
+        if rec_event and self.RECUR_TAG:
+            recurring = self.RECUR_TAG
+        else:
+            recurring = ""
 
+        # write new dates only
+        result = ""
+        
+        result = f"** CAL {start_date} {summary} {recurring}\n"
+        result += f"SCHEDULED: {start_date}\n"
         if description:
-            output.append(u"{}\n".format(description))
-        output.append(u"\n")
-        return ''.join(output)
+            result += f"{description}\n"
+            
+        return start_date, result 
 
 
 def check_timezone(ctx, param, value):
@@ -232,6 +226,11 @@ def main(ics_file, org_file, email, days, timezone, include_location, continue_o
                           continue_on_error=continue_on_error)
     try:
         convertor(ics_file, org_file)
+        
     except IcalError as e:
         click.echo(str(e), err=True)
         raise click.Abort()
+
+
+if __name__ == "__main__":
+    main()
